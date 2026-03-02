@@ -50,10 +50,12 @@ by orchestrating Copilot through standardized MCP tool calls.
 ```
 src/
   index.ts              # Entry point — MCP server setup + stdio transport
-  acp-client.ts         # ACP JSON-RPC client (stdio + TCP transport)
-  session-manager.ts    # Session lifecycle and handle-to-ID mapping
+  acp-client.ts         # ACP JSON-RPC client (NDJSON over stdio)
   process-manager.ts    # Copilot child process spawning and recovery
+  session-manager.ts    # Session lifecycle and handle-to-ID mapping
   response-aggregator.ts # Stream collection from session/update notifications
+  config.ts             # Environment variable configuration
+  logger.ts             # Structured stderr logging (JSON format)
   tools/                # MCP tool definitions and handlers
     copilot-prompt.ts
     copilot-session.ts
@@ -62,7 +64,9 @@ src/
   types/                # Shared TypeScript types and Zod schemas
     acp.ts              # ACP protocol message types
     mcp.ts              # MCP tool input/output types
+    index.ts            # Re-exports
 dist/                   # Compiled output (gitignored)
+prototypes/             # Prototype apps (gitignored, not published)
 ```
 
 ### File and Code Limits
@@ -86,10 +90,21 @@ dist/                   # Compiled output (gitignored)
 1. **TypeScript/Node.js** — MCP SDK is TypeScript-native; ACP is JSON-RPC (trivial in Node)
 2. **Stdio primary, TCP optional** — Stdio is zero-config (we spawn Copilot), TCP for advanced use
 3. **Lazy initialization** — Don't start Copilot until first tool call
-4. **YOLO mode default** — Auto-approve all Copilot permissions; pluggable interface for future policies
+4. **YOLO mode default** — Copilot spawned with `--allow-all` flag AND JSON-RPC permission auto-approval (both layers required)
 5. **npx distribution** — Standard MCP server pattern; always-latest, zero-friction setup
 6. **Zod schemas** — Required by MCP SDK; use for both tool inputs and ACP message validation
 7. **Focused tool surface** — 6 tools (not 22 like MCACP); purpose-built for Copilot workflow
+
+## ACP Protocol Notes (Discovered During Implementation)
+
+These diverge from the ACP spec and reflect Copilot's actual behavior:
+
+- **Session update discriminator**: Copilot uses `sessionUpdate` as the discriminator field in `session/update` notifications, not `type` as documented in the ACP spec
+- **YOLO requires `--allow-all`**: JSON-RPC `session/request_permission` auto-approval alone is NOT sufficient — Copilot has a separate CLI-level permission system controlled by the `--allow-all` flag
+- **`session/new` requires `mcpServers`**: The `mcpServers: []` parameter is required even when empty
+- **`terminal` capability**: Must be sent as `true` boolean, not `{ create: true }` object form
+- **`session/destroy` not supported**: Returns `-32601 Method not found` — sessions clean up on process exit
+- **`tool_call_update` with `rawOutput`**: Copilot sends `rawOutput` in tool call updates which doesn't match the `ContentBlock` schema — parse failures for these are benign
 
 ## MCP Tools Exposed
 
@@ -107,6 +122,12 @@ dist/                   # Compiled output (gitignored)
 **MCACP** (Oortonaut/mcacp) is a general-purpose MCP-to-ACP bridge with 22 tools supporting
 any ACP agent. Our differentiator: purpose-built for the Claude Code + Copilot workflow with
 a simpler, focused tool surface and zero-config startup.
+
+## Distribution
+
+- **npm**: https://www.npmjs.com/package/mcp-copilot-acp
+- **GitHub**: https://github.com/bsmi021/mcp-copilot-acp
+- **Install**: `npx -y mcp-copilot-acp` (or see README for Claude Code config)
 
 ## References
 

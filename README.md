@@ -1,5 +1,10 @@
 # mcp-copilot-acp
 
+[![npm version](https://img.shields.io/npm/v/mcp-copilot-acp)](https://www.npmjs.com/package/mcp-copilot-acp)
+[![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue)](./LICENSE)
+
 MCP server that bridges Claude Code to GitHub Copilot via the Agent Client Protocol (ACP). Enables Claude Code to delegate coding tasks, chain agent workflows, and compare outputs by orchestrating Copilot through standardized MCP tool calls.
 
 ## Architecture
@@ -159,6 +164,47 @@ src/
     index.ts            # Re-exports
 ```
 
+## Usage Examples
+
+### One-shot prompt
+
+Ask Copilot a question and get a response in one call:
+
+```
+copilot_prompt({ prompt: "Explain the factory pattern in TypeScript" })
+```
+
+### Multi-turn session
+
+Maintain context across multiple prompts:
+
+```
+# Create a session
+copilot_session_create({ workingDirectory: "/path/to/project" })
+# → { sessionHandle: "abc-123" }
+
+# First prompt — Copilot reads the codebase
+copilot_session_prompt({ sessionHandle: "abc-123", prompt: "Review the auth module" })
+
+# Follow-up — Copilot remembers the previous context
+copilot_session_prompt({ sessionHandle: "abc-123", prompt: "Now add rate limiting to it" })
+
+# Clean up
+copilot_session_destroy({ sessionHandle: "abc-123" })
+```
+
+### Compare outputs
+
+Get Copilot's take on a task with timing metadata:
+
+```
+copilot_compare({ prompt: "Write a debounce function", workingDirectory: "." })
+```
+
 ## License
 
 MIT
+
+---
+
+© 2026 Brian W. Smith. All rights reserved.
