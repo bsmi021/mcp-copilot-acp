@@ -1,0 +1,11 @@
+src/
+*.test.ts
+*.test.js
+tsconfig.json
+.gitignore
+.env
+.env.*
+coverage/
+prototypes/
+docs/
+.claude/

@@ -1,0 +1,43 @@
+{
+  "name": "mcp-copilot-acp",
+  "version": "0.1.0",
+  "description": "MCP server bridging Claude Code to GitHub Copilot via Agent Client Protocol (ACP)",
+  "type": "module",
+  "bin": {
+    "mcp-copilot-acp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "acp",
+    "copilot",
+    "claude",
+    "github-copilot",
+    "agent-client-protocol",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "cross-spawn": "^7.0.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^22.19.13",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}

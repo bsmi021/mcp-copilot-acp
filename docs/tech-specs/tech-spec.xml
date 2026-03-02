@@ -1,0 +1,889 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tech-spec 
+    name="copilot-acp-mcp-server" 
+    created="2026-03-02" 
+    last-updated="2026-03-02"
+    overall-status="not-started"
+    acp-protocol-version="2025-09-01">
+    
+    <metadata>
+        <author>B</author>
+        <team>Solo</team>
+        <reviewers>
+            <reviewer role="technical">B</reviewer>
+        </reviewers>
+        <approval-status>draft</approval-status>
+    </metadata>
+
+    <!-- ============================================================
+         OVERVIEW
+         ============================================================ -->
+    <overview status="in-progress">
+        <purpose>
+            Build an MCP server that acts as an ACP client to GitHub Copilot's ACP server.
+            This allows Claude Code (as the MCP client) to orchestrate GitHub Copilot 
+            through standardized tool calls — delegating tasks, chaining agent workflows,
+            and comparing outputs between Claude and Copilot on the same prompts.
+            
+            The server bridges two protocols:
+            - Upstream (toward Claude Code): MCP (Model Context Protocol) — exposes tools
+            - Downstream (toward Copilot): ACP (Agent Client Protocol) — sends prompts, manages sessions
+        </purpose>
+        <goals>
+            <goal>Enable Claude Code to delegate specific coding tasks to Copilot via MCP tools</goal>
+            <goal>Support agent chaining where Claude plans and Copilot executes (or vice versa)</goal>
+            <goal>Enable side-by-side output comparison by running the same prompt through Copilot</goal>
+            <goal>Manage Copilot ACP sessions (one-shot and persistent) transparently</goal>
+            <goal>Auto-approve all Copilot permission requests (YOLO mode)</goal>
+        </goals>
+        <competitive-landscape>
+            <existing-solution name="MCACP" url="https://github.com/Oortonaut/mcacp" license="Apache-2.0">
+                <description>
+                    General-purpose MCP-to-ACP bridge that works with ANY ACP agent
+                    (Copilot, Claude Code, Codex, Gemini, etc.). Exposes 22 MCP tools
+                    covering registry management, agent lifecycle, session management,
+                    agent interaction, and status monitoring. Supports 4 permission policies
+                    (allow_all, deny_all, elicit, operator).
+                </description>
+                <differentiation>
+                    mcp-copilot-acp differentiates by being purpose-built for the
+                    Claude Code + GitHub Copilot workflow. Fewer tools (focused surface),
+                    simpler configuration, zero-config startup, and optimized for the
+                    single-agent Copilot use case rather than multi-agent orchestration.
+                </differentiation>
+            </existing-solution>
+            <note>
+                ACP-MCP-Server (GongRzhe) bridges IBM's Agent Communication Protocol — a
+                different protocol also abbreviated "ACP". Not relevant to Agent Client Protocol.
+            </note>
+        </competitive-landscape>
+        <scope>
+            <in-scope>
+                <item>MCP server exposing Copilot orchestration tools to Claude Code</item>
+                <item>ACP client implementation connecting to `copilot --acp` via stdio or TCP</item>
+                <item>Session management: create, reuse, destroy Copilot ACP sessions</item>
+                <item>Streaming response collection from Copilot ACP updates</item>
+                <item>Auto-approval of all Copilot permission/tool-execution requests</item>
+                <item>Working directory passthrough (Copilot works in the same project context)</item>
+                <item>Windows 11 / PowerShell compatibility</item>
+            </in-scope>
+            <out-of-scope>
+                <item>GUI or web dashboard — CLI/MCP only</item>
+                <item>Multi-agent orchestration beyond Copilot (Gemini, Codex, etc.) — future extension</item>
+                <item>Copilot authentication management — assumes `copilot` CLI is already authenticated</item>
+                <item>Custom permission policies — YOLO mode only for v1</item>
+                <item>Proxying Copilot's model as an LLM endpoint (this is orchestration, not API proxying)</item>
+            </out-of-scope>
+        </scope>
+    </overview>
+
+    <!-- ============================================================
+         REQUIREMENTS
+         ============================================================ -->
+    <requirements status="in-progress">
+        <functional>
+            <!-- === Core ACP Client === -->
+            <item id="F-001" status="not-started" priority="critical">
+                <description>
+                    Connect to Copilot's ACP server via stdio (`copilot --acp`) by spawning 
+                    it as a child process, or via TCP (`copilot --acp --port {port}`).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Successfully sends ACP `initialize` and receives `InitializeResponse`</criterion>
+                    <criterion>Handles both stdio and TCP transport modes via configuration</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-002" status="not-started" priority="critical">
+                <description>
+                    Implement ACP initialization handshake: send `initialize` with client 
+                    capabilities (fileSystem read/write, terminal create), receive and store 
+                    agent capabilities from Copilot.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Exchanges protocol version and capabilities per ACP spec</criterion>
+                    <criterion>Stores Copilot's advertised capabilities for capability-aware tool exposure</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-003" status="not-started" priority="critical">
+                <description>
+                    Create new ACP sessions via `session/new` with configurable working directory 
+                    that defaults to the current project root.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Returns a valid sessionId from Copilot</criterion>
+                    <criterion>Working directory is passed and respected by Copilot</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-004" status="not-started" priority="critical">
+                <description>
+                    Send prompts to Copilot via `session/prompt` and collect the full streamed 
+                    response by aggregating `session/update` notifications until a `PromptResponse` 
+                    with a stop reason is received.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Sends text prompts with optional context/resources</criterion>
+                    <criterion>Aggregates all message chunks into a complete response</criterion>
+                    <criterion>Captures tool calls, tool results, and thought updates</criterion>
+                    <criterion>Returns structured result with full text, tool calls log, and stop reason</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-005" status="not-started" priority="critical">
+                <description>
+                    Auto-approve all Copilot permission requests (`session/request_permission`) 
+                    by immediately responding with approval. No user interaction required.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Every permission request receives an immediate "allow" response</criterion>
+                    <criterion>Permission requests are logged for transparency</criterion>
+                </acceptance-criteria>
+            </item>
+
+            <!-- === Session Management === -->
+            <item id="F-006" status="not-started" priority="high">
+                <description>
+                    Support two session modes:
+                    - One-shot: Create session, send prompt, collect response, destroy session.
+                    - Persistent: Create session once, send multiple prompts over time, 
+                      explicitly destroy when done.
+                    Claude Code selects the mode per tool call.
+                </description>
+                <acceptance-criteria>
+                    <criterion>One-shot tool creates and tears down session automatically</criterion>
+                    <criterion>Persistent session tools allow create/prompt/destroy as separate calls</criterion>
+                    <criterion>Session state tracked in memory with sessionId mapping</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-007" status="not-started" priority="high">
+                <description>
+                    Handle Copilot's file system requests (`fs/read_text_file`, `fs/write_text_file`) 
+                    by performing the actual file I/O on the local filesystem, scoped to the 
+                    session's working directory.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Read requests return file contents from disk</criterion>
+                    <criterion>Write requests create/overwrite files on disk</criterion>
+                    <criterion>Paths are resolved relative to working directory, no escaping allowed</criterion>
+                </acceptance-criteria>
+            </item>
+
+            <!-- === MCP Tool Surface === -->
+            <item id="F-008" status="not-started" priority="critical">
+                <description>
+                    Expose MCP tool: `copilot_prompt` — One-shot prompt. Creates a session, sends 
+                    the prompt, collects the full response, destroys the session, returns the result.
+                    Parameters: prompt (string), workingDirectory (string, optional), 
+                    context (string, optional — additional files or context to include).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Claude Code can call this tool and receive Copilot's complete response</criterion>
+                    <criterion>Response includes full text, tool calls performed, and stop reason</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-009" status="not-started" priority="high">
+                <description>
+                    Expose MCP tool: `copilot_session_create` — Creates a persistent Copilot session.
+                    Returns a sessionHandle that can be used in subsequent calls.
+                    Parameters: workingDirectory (string, optional), name (string, optional).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Returns a sessionHandle identifier</criterion>
+                    <criterion>Session remains alive for subsequent prompts</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-010" status="not-started" priority="high">
+                <description>
+                    Expose MCP tool: `copilot_session_prompt` — Sends a prompt to an existing 
+                    persistent session.
+                    Parameters: sessionHandle (string), prompt (string), context (string, optional).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Sends prompt to the correct existing session</criterion>
+                    <criterion>Maintains conversation context from prior prompts in that session</criterion>
+                    <criterion>Returns same structured result as copilot_prompt</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-011" status="not-started" priority="high">
+                <description>
+                    Expose MCP tool: `copilot_session_destroy` — Tears down a persistent session 
+                    and cleans up resources.
+                    Parameters: sessionHandle (string).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Session is removed from tracking</criterion>
+                    <criterion>Copilot process resources are cleaned up if no sessions remain</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-012" status="not-started" priority="medium">
+                <description>
+                    Expose MCP tool: `copilot_compare` — Runs the same prompt through Copilot 
+                    and returns the result alongside a placeholder for Claude's own response 
+                    (Claude Code handles its side; this tool only provides Copilot's output).
+                    Parameters: prompt (string), workingDirectory (string, optional).
+                </description>
+                <acceptance-criteria>
+                    <criterion>Returns Copilot's response clearly labeled for comparison</criterion>
+                    <criterion>Includes metadata: model used (if available), token count, duration</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-013" status="not-started" priority="medium">
+                <description>
+                    Expose MCP tool: `copilot_status` — Returns current state: whether the Copilot 
+                    ACP process is running, active sessions, and Copilot's advertised capabilities.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Reports process alive/dead status</criterion>
+                    <criterion>Lists active sessions with their IDs and creation times</criterion>
+                    <criterion>Shows Copilot's capabilities from initialization</criterion>
+                </acceptance-criteria>
+            </item>
+
+            <!-- === Lifecycle === -->
+            <item id="F-014" status="not-started" priority="high">
+                <description>
+                    Lazily start the Copilot ACP process on first tool call. Do not spawn Copilot 
+                    at MCP server startup — wait until actually needed.
+                </description>
+                <acceptance-criteria>
+                    <criterion>No Copilot process running until first tool invocation</criterion>
+                    <criterion>First tool call transparently starts and initializes Copilot</criterion>
+                    <criterion>Subsequent calls reuse the existing Copilot process</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-015" status="not-started" priority="medium">
+                <description>
+                    Automatically restart the Copilot ACP process if it crashes or becomes 
+                    unresponsive, with a configurable retry limit.
+                </description>
+                <acceptance-criteria>
+                    <criterion>Detects process exit or unresponsive state (no response within timeout)</criterion>
+                    <criterion>Restarts Copilot and re-initializes up to N times (default: 3)</criterion>
+                    <criterion>Returns clear error to Claude Code if retries exhausted</criterion>
+                </acceptance-criteria>
+            </item>
+            <item id="F-016" status="not-started" priority="medium">
+                <description>
+                    Gracefully shut down: when the MCP server receives shutdown, clean up all 
+                    Copilot sessions and terminate the Copilot ACP process.
+                </description>
+                <acceptance-criteria>
+                    <criterion>All active sessions are destroyed before process termination</criterion>
+                    <criterion>Copilot child process is terminated cleanly</criterion>
+                </acceptance-criteria>
+            </item>
+        </functional>
+
+        <non-functional>
+            <item id="NF-001" status="not-started" priority="high" category="performance">
+                <description>
+                    Prompt round-trip overhead (excluding Copilot's own thinking time) should 
+                    be minimal — protocol marshaling adds no more than 100ms.
+                </description>
+                <metric>Protocol overhead &lt; 100ms per prompt round-trip</metric>
+            </item>
+            <item id="NF-002" status="not-started" priority="high" category="reliability">
+                <description>
+                    Server must handle Copilot producing unexpectedly large responses or 
+                    long-running operations without hanging. Configurable timeout per prompt.
+                </description>
+                <metric>Default timeout: 300 seconds per prompt, configurable</metric>
+            </item>
+            <item id="NF-003" status="not-started" priority="medium" category="usability">
+                <description>
+                    Zero-config startup for the common case: `npx copilot-acp-mcp` or similar. 
+                    All defaults should work out of the box if `copilot` CLI is on PATH and authenticated.
+                </description>
+                <metric>Working setup in under 2 minutes from install</metric>
+            </item>
+            <item id="NF-004" status="not-started" priority="medium" category="observability">
+                <description>
+                    Structured logging of all ACP messages (sent/received) at debug level for 
+                    troubleshooting. Errors and permission auto-approvals logged at info level.
+                </description>
+                <metric>All ACP traffic loggable via --verbose flag</metric>
+            </item>
+            <item id="NF-005" status="not-started" priority="medium" category="compatibility">
+                <description>
+                    Must work on Windows 11 with PowerShell as primary environment. Also 
+                    support macOS and Linux for portability.
+                </description>
+                <metric>All tests pass on Windows 11 (PowerShell 7+), macOS, Ubuntu</metric>
+            </item>
+        </non-functional>
+    </requirements>
+
+    <!-- ============================================================
+         DESIGN
+         ============================================================ -->
+    <design status="in-progress">
+        <architecture>
+            <description>
+                The server sits between Claude Code (MCP client) and Copilot (ACP agent):
+
+                ┌─────────────┐     MCP (stdio)     ┌──────────────────┐     ACP (stdio/TCP)     ┌─────────────┐
+                │ Claude Code │ ◄──────────────────► │ copilot-acp-mcp  │ ◄──────────────────────► │ Copilot CLI │
+                │ (MCP Client)│    tool calls/results │ (MCP Server +    │   JSON-RPC 2.0          │ (ACP Agent) │
+                └─────────────┘                       │  ACP Client)     │   session/prompt/update  └─────────────┘
+                                                      └──────────────────┘
+
+                The MCP server is a single Node.js/TypeScript process that:
+                1. Listens for MCP tool calls from Claude Code via stdio
+                2. Translates them into ACP protocol messages
+                3. Manages the Copilot child process lifecycle
+                4. Tracks sessions in memory
+                5. Handles ACP bidirectional communication (Copilot can request files, permissions)
+            </description>
+            <components>
+                <component name="MCP Server Layer">
+                    <responsibility>
+                        Exposes MCP tools (copilot_prompt, copilot_session_*, copilot_compare, 
+                        copilot_status). Handles MCP protocol via @modelcontextprotocol/sdk.
+                    </responsibility>
+                    <interfaces>MCP stdio transport — tool definitions and call handlers</interfaces>
+                </component>
+                <component name="ACP Client Layer">
+                    <responsibility>
+                        Manages the JSON-RPC 2.0 connection to Copilot's ACP server. Sends 
+                        requests (initialize, session/new, session/prompt), handles responses, 
+                        and processes notifications (session/update). Also handles incoming 
+                        requests FROM Copilot (fs/read_text_file, session/request_permission).
+                    </responsibility>
+                    <interfaces>
+                        JSON-RPC 2.0 over stdio (child process stdin/stdout) or TCP socket.
+                        Bidirectional — both sides can initiate requests.
+                    </interfaces>
+                </component>
+                <component name="Session Manager">
+                    <responsibility>
+                        Tracks active sessions, maps sessionHandles (user-facing) to ACP 
+                        sessionIds (protocol-level). Manages session lifecycle and cleanup.
+                    </responsibility>
+                    <interfaces>Internal — used by MCP tool handlers</interfaces>
+                </component>
+                <component name="Process Manager">
+                    <responsibility>
+                        Spawns and manages the Copilot CLI child process. Handles lazy start, 
+                        crash detection, restart logic, and graceful shutdown.
+                    </responsibility>
+                    <interfaces>Internal — spawns `copilot --acp` or connects to TCP port</interfaces>
+                </component>
+                <component name="Response Aggregator">
+                    <responsibility>
+                        Collects streaming session/update notifications during a prompt turn.
+                        Aggregates message chunks, tool calls, thoughts, and plan updates into 
+                        a single structured response once the PromptResponse arrives.
+                    </responsibility>
+                    <interfaces>Internal — fed by ACP Client, consumed by MCP tool handlers</interfaces>
+                </component>
+            </components>
+        </architecture>
+        <data-flow>
+            <description>
+                Example flow for `copilot_prompt` (one-shot):
+                
+                1. Claude Code calls MCP tool `copilot_prompt` with prompt text
+                2. MCP Server Layer receives the call
+                3. Process Manager ensures Copilot is running (lazy start if needed)
+                4. ACP Client sends `session/new` → receives sessionId
+                5. ACP Client sends `session/prompt` with the text
+                6. Copilot streams back `session/update` notifications:
+                   - message chunks (agent text)
+                   - tool calls (file edits, terminal commands)
+                   - permission requests → auto-approved immediately
+                   - file read requests → fulfilled from local filesystem
+                7. Response Aggregator collects all updates
+                8. Copilot sends `PromptResponse` with stop_reason
+                9. Session Manager destroys the session
+                10. MCP Server Layer returns structured result to Claude Code
+            </description>
+        </data-flow>
+        <patterns>
+            <pattern name="Lazy Initialization">
+                <rationale>
+                    Don't pay Copilot startup cost unless actually needed. First tool call 
+                    triggers spawn + ACP initialize handshake.
+                </rationale>
+            </pattern>
+            <pattern name="Request-ID Correlation">
+                <rationale>
+                    ACP is bidirectional — both sides send requests. Must maintain separate 
+                    ID counters and correlate responses by ID. Use a pending-requests map 
+                    with Promise resolvers keyed by request ID.
+                </rationale>
+            </pattern>
+            <pattern name="Notification Routing">
+                <rationale>
+                    session/update notifications have no request ID. Route them to the correct 
+                    Response Aggregator instance by sessionId extracted from the notification params.
+                </rationale>
+            </pattern>
+        </patterns>
+        <decisions>
+            <decision id="D-001">
+                <question>What language/runtime for the MCP server?</question>
+                <chosen>TypeScript on Node.js</chosen>
+                <alternatives>
+                    <alternative>Python with FastMCP — good ecosystem but less native MCP SDK support</alternative>
+                    <alternative>Rust — fast but overkill for a bridge server</alternative>
+                </alternatives>
+                <rationale>
+                    The MCP SDK (@modelcontextprotocol/sdk) is TypeScript-native. The ACP 
+                    protocol is JSON-RPC which is trivial in Node. Child process management 
+                    is well-supported. B already works with Node/TypeScript in their stack.
+                </rationale>
+            </decision>
+            <decision id="D-002">
+                <question>Stdio vs TCP for connecting to Copilot?</question>
+                <chosen>Default to stdio (spawn child process), with TCP as a config option</chosen>
+                <alternatives>
+                    <alternative>TCP only — requires user to start Copilot separately</alternative>
+                    <alternative>Stdio only — can't connect to an already-running Copilot</alternative>
+                </alternatives>
+                <rationale>
+                    Stdio is zero-config: we spawn `copilot --acp` ourselves and own the 
+                    lifecycle. TCP is useful for advanced cases (shared Copilot instance, 
+                    remote machine). Supporting both is low cost.
+                </rationale>
+            </decision>
+            <decision id="D-003">
+                <question>How to handle Copilot's file system requests?</question>
+                <chosen>Fulfill them directly from local filesystem, scoped to working directory</chosen>
+                <alternatives>
+                    <alternative>Reject all fs requests — limits Copilot's ability to read context</alternative>
+                    <alternative>Proxy to Claude Code — adds complexity, Claude Code doesn't expose this via MCP</alternative>
+                </alternatives>
+                <rationale>
+                    Copilot needs to read files to understand context. Since we're in YOLO mode,
+                    fulfilling fs requests directly is the simplest path. Path traversal 
+                    prevention is the only guard needed.
+                </rationale>
+            </decision>
+            <decision id="D-004">
+                <question>How to distribute the MCP server to users?</question>
+                <chosen>npm package distributed via npx -y mcp-copilot-acp</chosen>
+                <alternatives>
+                    <alternative>Global npm install — version management burden on users</alternative>
+                    <alternative>Docker container — overkill for a local bridge tool, slower startup</alternative>
+                    <alternative>Standalone CLI binary — more complex build/release pipeline</alternative>
+                </alternatives>
+                <rationale>
+                    npx -y is the standard MCP server distribution pattern (used by the majority
+                    of 29,000+ MCP servers on npm). Zero-friction: users always get the latest
+                    version. One-command Claude Code setup:
+                    claude mcp add --transport stdio copilot-bridge -- npx -y mcp-copilot-acp
+                    On Windows: cmd /c npx -y mcp-copilot-acp
+                </rationale>
+            </decision>
+            <decision id="D-005">
+                <question>How to validate MCP tool input schemas?</question>
+                <chosen>Zod (required peer dependency of @modelcontextprotocol/sdk)</chosen>
+                <alternatives>
+                    <alternative>Manual validation — error-prone, no type inference</alternative>
+                    <alternative>JSON Schema directly — verbose, no runtime type narrowing</alternative>
+                </alternatives>
+                <rationale>
+                    @modelcontextprotocol/sdk v1.27+ requires Zod as a peer dependency.
+                    Tool input schemas are defined as Zod schemas and automatically converted
+                    to JSON Schema for the MCP protocol. Provides compile-time types and
+                    runtime validation in one declaration.
+                </rationale>
+            </decision>
+            <decision id="D-006">
+                <question>Permission policy model for Copilot tool approvals?</question>
+                <chosen>allow_all (YOLO mode) as default, with future extensibility for deny_all and elicit</chosen>
+                <alternatives>
+                    <alternative>Hardcoded allow_all only — simplest but limits future use</alternative>
+                    <alternative>Full 4-policy model from day one — over-engineering for v1</alternative>
+                </alternatives>
+                <rationale>
+                    v1 targets YOLO mode (auto-approve everything). However, the permission
+                    handler should be a pluggable interface so deny_all and elicit policies
+                    can be added later without refactoring. MCACP's 4-policy model validates
+                    that users eventually want granular control.
+                </rationale>
+            </decision>
+        </decisions>
+        <dependencies>
+            <dependency name="@modelcontextprotocol/sdk" version="^1.27.1" type="production">
+                <purpose>MCP server framework — tool registration, stdio transport, protocol handling</purpose>
+                <note>Use v1.x stable. v2 is pre-alpha as of March 2026 — do not adopt yet.</note>
+            </dependency>
+            <dependency name="zod" version="^3.25.76" type="production">
+                <purpose>Runtime schema validation for MCP tool inputs. Required peer dep of MCP SDK.</purpose>
+                <note>MCP SDK accepts ^3.25 || ^4.0. Pin to v3.x for stability. Zod 4.x (4.3.6) is available but v3.x is safer.</note>
+            </dependency>
+            <dependency name="cross-spawn" version="^7.0.6" type="production">
+                <purpose>Cross-platform child process spawning for copilot --acp</purpose>
+                <note>Handles Windows cmd.exe quirks, argument escaping, and PATHEXT resolution.</note>
+            </dependency>
+            <dependency name="typescript" version="^5.9.3" type="devDependency">
+                <purpose>TypeScript compiler</purpose>
+            </dependency>
+            <dependency name="vitest" version="^4.0.18" type="devDependency">
+                <purpose>Test runner — fast, native ESM support, TypeScript out of the box</purpose>
+            </dependency>
+            <dependency name="@types/node" version="^22.19.13" type="devDependency">
+                <purpose>Node.js type definitions matching LTS 22</purpose>
+            </dependency>
+        </dependencies>
+        <project-config>
+            <tsconfig>
+                target: ES2022
+                module: NodeNext
+                moduleResolution: NodeNext
+                strict: true
+                esModuleInterop: true
+                skipLibCheck: true
+                forceConsistentCasingInFileNames: true
+                outDir: ./dist
+                rootDir: ./src
+            </tsconfig>
+            <package-json>
+                type: module (required for ESM imports of MCP SDK subpaths)
+                bin: { "mcp-copilot-acp": "./dist/index.js" }
+                entry file shebang: #!/usr/bin/env node
+            </package-json>
+        </project-config>
+    </design>
+
+    <!-- ============================================================
+         IMPLEMENTATION PLAN
+         ============================================================ -->
+    <implementation status="not-started">
+        <phases>
+            <phase id="P-001" name="ACP Client Core" status="not-started">
+                <description>
+                    Build the raw ACP client: JSON-RPC transport, message parsing, 
+                    request/response correlation, notification handling. Test against 
+                    `copilot --acp` directly.
+                </description>
+                <milestone>
+                    <target-date>TBD</target-date>
+                    <deliverable>Working ACP client that can initialize, create sessions, and send prompts to Copilot</deliverable>
+                </milestone>
+                <tasks>
+                    <task id="T-001" status="not-started" estimate="3 hours">
+                        <description>JSON-RPC 2.0 transport layer (stdio + TCP) with newline-delimited JSON</description>
+                    </task>
+                    <task id="T-002" status="not-started" estimate="2 hours">
+                        <description>Request/response correlation with pending-requests map and Promise resolvers</description>
+                    </task>
+                    <task id="T-003" status="not-started" estimate="2 hours">
+                        <description>ACP message types: initialize, session/new, session/prompt, session/update parsing</description>
+                    </task>
+                    <task id="T-004" status="not-started" estimate="1 hour">
+                        <description>Bidirectional handler for incoming Copilot requests (fs/read_text_file, request_permission)</description>
+                    </task>
+                    <task id="T-005" status="not-started" estimate="1 hour">
+                        <description>Response Aggregator: collect session/update chunks into structured result</description>
+                    </task>
+                    <task id="T-006" status="not-started" estimate="2 hours">
+                        <description>Integration test: initialize → session/new → session/prompt → collect response from live Copilot</description>
+                    </task>
+                </tasks>
+            </phase>
+            <phase id="P-002" name="MCP Server + Tool Surface" status="not-started">
+                <description>
+                    Wire the ACP client into an MCP server. Define and implement all MCP tools. 
+                    Add session management and process lifecycle.
+                </description>
+                <milestone>
+                    <target-date>TBD</target-date>
+                    <deliverable>MCP server installable via npx that Claude Code can use to orchestrate Copilot</deliverable>
+                </milestone>
+                <tasks>
+                    <task id="T-007" status="not-started" estimate="2 hours">
+                        <description>MCP server scaffold with @modelcontextprotocol/sdk, stdio transport</description>
+                        <dependencies>T-001</dependencies>
+                    </task>
+                    <task id="T-008" status="not-started" estimate="2 hours">
+                        <description>Implement copilot_prompt tool (one-shot)</description>
+                        <dependencies>T-005</dependencies>
+                    </task>
+                    <task id="T-009" status="not-started" estimate="2 hours">
+                        <description>Implement copilot_session_create / copilot_session_prompt / copilot_session_destroy tools</description>
+                        <dependencies>T-008</dependencies>
+                    </task>
+                    <task id="T-010" status="not-started" estimate="1 hour">
+                        <description>Implement copilot_compare tool</description>
+                        <dependencies>T-008</dependencies>
+                    </task>
+                    <task id="T-011" status="not-started" estimate="1 hour">
+                        <description>Implement copilot_status tool</description>
+                        <dependencies>T-007</dependencies>
+                    </task>
+                    <task id="T-012" status="not-started" estimate="2 hours">
+                        <description>Process Manager: lazy start, crash detection, restart with retry limit</description>
+                        <dependencies>T-001</dependencies>
+                    </task>
+                    <task id="T-013" status="not-started" estimate="1 hour">
+                        <description>Session Manager: handle-to-ID mapping, cleanup on destroy</description>
+                        <dependencies>T-003</dependencies>
+                    </task>
+                    <task id="T-014" status="not-started" estimate="1 hour">
+                        <description>Graceful shutdown handler</description>
+                        <dependencies>T-012,T-013</dependencies>
+                    </task>
+                </tasks>
+            </phase>
+            <phase id="P-003" name="Polish + Distribution" status="not-started">
+                <description>
+                    Configuration, logging, documentation, npm packaging, and Claude Code 
+                    integration instructions.
+                </description>
+                <milestone>
+                    <target-date>TBD</target-date>
+                    <deliverable>Published npm package with README and Claude Code setup guide</deliverable>
+                </milestone>
+                <tasks>
+                    <task id="T-015" status="not-started" estimate="1 hour">
+                        <description>Configuration: env vars and CLI flags for transport mode, port, timeout, retry limit, verbose logging</description>
+                    </task>
+                    <task id="T-016" status="not-started" estimate="1 hour">
+                        <description>Structured logging with --verbose flag for ACP message tracing</description>
+                    </task>
+                    <task id="T-017" status="not-started" estimate="1 hour">
+                        <description>README with Claude Code MCP configuration examples (.claude/settings.json)</description>
+                    </task>
+                    <task id="T-018" status="not-started" estimate="1 hour">
+                        <description>npm package.json, bin entry, tsconfig, build scripts</description>
+                    </task>
+                </tasks>
+            </phase>
+        </phases>
+        <risks>
+            <risk id="R-001" likelihood="medium" impact="high">
+                <description>
+                    Copilot's ACP implementation is in public preview and may change or have 
+                    undocumented behaviors. The protocol surface could shift.
+                </description>
+                <mitigation>
+                    Pin to a known working Copilot CLI version. Isolate ACP message handling 
+                    behind an abstraction so changes are contained. Log all raw messages for debugging.
+                </mitigation>
+            </risk>
+            <risk id="R-002" likelihood="medium" impact="medium">
+                <description>
+                    Copilot may not support YOLO mode via ACP — the `--yolo` flag reportedly 
+                    doesn't work with `--acp`. Permission requests may be mandatory.
+                </description>
+                <mitigation>
+                    Auto-approve is implemented at the ACP client level (our code responds 
+                    immediately to permission requests). We don't depend on Copilot's --yolo flag.
+                </mitigation>
+            </risk>
+            <risk id="R-003" likelihood="low" impact="high">
+                <description>
+                    Copilot CLI may have authentication or license requirements that prevent 
+                    headless/automated usage via ACP.
+                </description>
+                <mitigation>
+                    Validate early in Phase 1. Document required Copilot subscription tier. 
+                    Fail fast with clear error message if authentication is missing.
+                </mitigation>
+            </risk>
+            <risk id="R-004" likelihood="medium" impact="medium">
+                <description>
+                    Windows-specific child process spawning and stdio piping quirks 
+                    (PowerShell vs cmd, line endings, encoding).
+                </description>
+                <mitigation>
+                    Use cross-spawn or execa for child process management. Test on Windows 
+                    early and often. Handle \r\n line endings in JSON-RPC parsing.
+                </mitigation>
+            </risk>
+        </risks>
+        <resources>
+            <resource type="personnel">B (solo developer)</resource>
+            <resource type="infrastructure">Node.js 22 LTS (22.22.0+), npm, GitHub Copilot CLI (authenticated), TypeScript 5.9+</resource>
+            <resource type="infrastructure">Windows 11 + PowerShell 7+ for primary development</resource>
+        </resources>
+    </implementation>
+
+    <!-- ============================================================
+         TESTING STRATEGY
+         ============================================================ -->
+    <testing status="not-started">
+        <unit-tests>
+            <test id="UT-001" status="not-started" covers="F-002">
+                <description>JSON-RPC message serialization/deserialization</description>
+                <approach>Test encoding/decoding of all ACP message types with known payloads</approach>
+            </test>
+            <test id="UT-002" status="not-started" covers="F-004">
+                <description>Response Aggregator correctly assembles chunks into structured output</description>
+                <approach>Feed mock session/update notifications and verify final aggregated result</approach>
+            </test>
+            <test id="UT-003" status="not-started" covers="F-005">
+                <description>Permission auto-approval responds correctly to all permission request variants</description>
+                <approach>Mock permission requests with various tool kinds and verify immediate approval response</approach>
+            </test>
+            <test id="UT-004" status="not-started" covers="F-006">
+                <description>Session Manager tracks sessions correctly (create, lookup, destroy)</description>
+                <approach>Unit test session CRUD operations and handle-to-ID mapping</approach>
+            </test>
+            <test id="UT-005" status="not-started" covers="F-007">
+                <description>File system handler resolves paths safely within working directory</description>
+                <approach>Test with normal paths, relative paths, and path traversal attempts (../ etc)</approach>
+            </test>
+        </unit-tests>
+        <integration-tests>
+            <test id="IT-001" status="not-started" covers="F-001,F-002,F-003,F-004">
+                <description>Full ACP handshake and one-shot prompt against live Copilot CLI</description>
+                <approach>Spawn real Copilot --acp, initialize, create session, send simple prompt, verify response</approach>
+            </test>
+            <test id="IT-002" status="not-started" covers="F-008,F-009,F-010,F-011">
+                <description>MCP tool calls work end-to-end through the server to Copilot</description>
+                <approach>Use MCP SDK test client to call each tool and verify responses</approach>
+            </test>
+            <test id="IT-003" status="not-started" covers="F-014,F-015">
+                <description>Lazy start and crash recovery</description>
+                <approach>Call tool (triggers lazy start), kill Copilot process, call tool again (triggers restart)</approach>
+            </test>
+        </integration-tests>
+        <e2e-tests>
+            <test id="E2E-001" status="not-started" covers="F-008,F-004,F-005">
+                <description>Claude Code delegates a real coding task to Copilot via copilot_prompt</description>
+                <steps>
+                    <step>Configure MCP server in Claude Code settings</step>
+                    <step>Ask Claude Code to delegate a task to Copilot</step>
+                    <step>Verify Copilot's response is returned and usable by Claude Code</step>
+                </steps>
+                <expected-result>Claude Code receives and can act on Copilot's coding output</expected-result>
+            </test>
+            <test id="E2E-002" status="not-started" covers="F-009,F-010,F-011">
+                <description>Multi-turn conversation via persistent session</description>
+                <steps>
+                    <step>Create persistent session</step>
+                    <step>Send initial coding prompt</step>
+                    <step>Send follow-up prompt referencing prior context</step>
+                    <step>Verify Copilot remembers context from first prompt</step>
+                    <step>Destroy session</step>
+                </steps>
+                <expected-result>Copilot maintains conversation context across prompts within a session</expected-result>
+            </test>
+        </e2e-tests>
+        <performance-tests>
+            <test id="PT-001" status="not-started" covers="NF-001">
+                <description>Measure protocol overhead excluding Copilot thinking time</description>
+                <target>Overhead &lt; 100ms per prompt round-trip</target>
+            </test>
+        </performance-tests>
+        <coverage-matrix>
+            <mapping requirement="F-001" tests="IT-001"/>
+            <mapping requirement="F-002" tests="UT-001,IT-001"/>
+            <mapping requirement="F-003" tests="IT-001"/>
+            <mapping requirement="F-004" tests="UT-002,IT-001"/>
+            <mapping requirement="F-005" tests="UT-003,E2E-001"/>
+            <mapping requirement="F-006" tests="UT-004,E2E-002"/>
+            <mapping requirement="F-007" tests="UT-005"/>
+            <mapping requirement="F-008" tests="IT-002,E2E-001"/>
+            <mapping requirement="F-009" tests="IT-002,E2E-002"/>
+            <mapping requirement="F-010" tests="IT-002,E2E-002"/>
+            <mapping requirement="F-011" tests="IT-002,E2E-002"/>
+            <mapping requirement="F-012" tests="IT-002"/>
+            <mapping requirement="F-013" tests="IT-002"/>
+            <mapping requirement="F-014" tests="IT-003"/>
+            <mapping requirement="F-015" tests="IT-003"/>
+            <mapping requirement="NF-001" tests="PT-001"/>
+        </coverage-matrix>
+    </testing>
+
+    <!-- ============================================================
+         SECURITY CONSIDERATIONS
+         ============================================================ -->
+    <security status="in-progress">
+        <threat-model>
+            <threat id="SEC-001" category="exposure">
+                <description>
+                    Path traversal via Copilot's fs/read_text_file requests could read 
+                    files outside the intended working directory (e.g., ~/.ssh/id_rsa).
+                </description>
+                <likelihood>medium</likelihood>
+                <impact>high</impact>
+                <mitigation status="not-started">
+                    <description>Resolve all paths and verify they fall within the working directory</description>
+                    <implementation>
+                        Use path.resolve() then verify result starts with the working directory 
+                        prefix. Reject any path that resolves outside. Log rejected attempts.
+                    </implementation>
+                </mitigation>
+            </threat>
+            <threat id="SEC-002" category="exposure">
+                <description>
+                    YOLO mode auto-approves all tool executions by Copilot, which could include 
+                    destructive operations (rm -rf, git force push, etc.).
+                </description>
+                <likelihood>low</likelihood>
+                <impact>high</impact>
+                <mitigation status="not-started">
+                    <description>
+                        Accepted risk for v1 (user explicitly opted into YOLO). Log all 
+                        approved permissions with full details for auditability. Document 
+                        the risk prominently in README.
+                    </description>
+                    <implementation>Log every permission approval with tool kind, description, and affected paths</implementation>
+                </mitigation>
+            </threat>
+            <threat id="SEC-003" category="injection">
+                <description>
+                    Prompt injection via file contents — if Copilot reads files that contain 
+                    adversarial instructions, it could be manipulated.
+                </description>
+                <likelihood>low</likelihood>
+                <impact>medium</impact>
+                <mitigation status="not-started">
+                    <description>
+                        Out of scope for this server — this is a Copilot-level concern. 
+                        Our server is a transparent bridge and does not filter prompt content.
+                    </description>
+                    <implementation>Document in README that prompt injection risks are inherited from Copilot</implementation>
+                </mitigation>
+            </threat>
+        </threat-model>
+        <data-handling>
+            <sensitive-data>
+                <item type="credentials">Copilot authentication tokens (managed by Copilot CLI, not by this server)</item>
+                <item type="source-code">File contents read from disk and passed to Copilot</item>
+            </sensitive-data>
+            <encryption>
+                <at-rest>N/A — no persistent storage</at-rest>
+                <in-transit>Stdio (same machine, no network). TCP mode: localhost only by default.</in-transit>
+            </encryption>
+        </data-handling>
+        <access-control>
+            <authentication>None — relies on Copilot CLI's own authentication</authentication>
+            <authorization>Working directory scoping for file access</authorization>
+        </access-control>
+        <compliance>
+            <requirement>N/A — local developer tool, no user data storage</requirement>
+        </compliance>
+    </security>
+
+    <!-- ============================================================
+         PROGRESS TRACKING
+         ============================================================ -->
+    <progress>
+        <summary>
+            <total-items>37</total-items>
+            <completed>0</completed>
+            <in-progress>0</in-progress>
+            <blocked>0</blocked>
+            <percentage>0</percentage>
+        </summary>
+        <blockers>
+        </blockers>
+        <notes>
+            <note date="2026-03-02">Initial spec created. Awaiting review before implementation.</note>
+            <note date="2026-03-02">
+                Research completed: Validated architecture against current MCP ecosystem.
+                - Confirmed pure stdio MCP server via npx is the standard pattern (29K+ servers on npm).
+                - Identified MCACP as existing general-purpose competitor (22 tools, multi-agent).
+                - Our differentiator: focused Copilot-only bridge with simpler tool surface.
+                - Pinned dependency versions: MCP SDK 1.27.1, Zod 3.25.76, TS 5.9.3, Vitest 4.0.18.
+                - Added design decisions D-004 (npx distribution), D-005 (Zod validation), D-006 (permission policy).
+                - Added full dependency manifest and project config (tsconfig, package.json) to spec.
+                - ACP protocol version 2025-09-01 confirmed stable in Copilot public preview.
+            </note>
+        </notes>
+    </progress>
+
+</tech-spec>
