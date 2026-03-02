@@ -1,12 +1,20 @@
 {
   "name": "mcp-copilot-acp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server bridging Claude Code to GitHub Copilot via Agent Client Protocol (ACP)",
   "type": "module",
   "bin": {
     "mcp-copilot-acp": "./dist/index.js"
   },
   "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bsmi021/mcp-copilot-acp.git"
+  },
+  "author": "Brian W. Smith",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
