@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- GitHub Actions CI/CD workflow (`.github/workflows/publish.yml`) — auto-builds, tests, and publishes to npm on push to `main` when `package.json` version changes, using npm Trusted Publishing (OIDC) with provenance attestations
+
 ## [0.1.1] - 2026-03-02
 
 ### Fixed
